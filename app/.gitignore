@@ -1,0 +1,22 @@
+# Gradle files
+.gradle/
+build/
+
+# Local configuration files (IMPORTANT: This keeps your keys safe)
+local.properties
+
+# Log files
+*.log
+
+# Android Studio files
+.idea/
+*.iml
+.cxx/
+capture/
+
+# Keystore files (If you ever generate one)
+*.jks
+*.keystore
+
+# Google Services configuration (Optional: some teams ignore this for security)
+google-services.json
