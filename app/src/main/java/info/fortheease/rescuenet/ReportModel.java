@@ -18,6 +18,7 @@ public class ReportModel {
     private int resolvedCount = 0; // Number of people who marked it as resolved
     private String source = "RescueNet"; // Default source
     private boolean isAnalyzedByAI = false;
+    private boolean isSyncedWithFirestore = false;
 
     // Required for Firestore
     public ReportModel() {
@@ -73,4 +74,7 @@ public class ReportModel {
 
     public boolean isAnalyzedByAI() { return isAnalyzedByAI; }
     public void setAnalyzedByAI(boolean analyzedByAI) { isAnalyzedByAI = analyzedByAI; }
+
+    public boolean isSyncedWithFirestore() { return isSyncedWithFirestore; }
+    public void setSyncedWithFirestore(boolean syncedWithFirestore) { isSyncedWithFirestore = syncedWithFirestore; }
 }

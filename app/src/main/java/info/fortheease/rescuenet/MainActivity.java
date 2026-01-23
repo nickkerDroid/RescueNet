@@ -73,7 +73,7 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
     private ReportAdapter adapter;
     private static final int LOCATION_PERMISSION_REQUEST_CODE = 1001;
     private FusedLocationProviderClient fusedLocationClient;
-    private boolean isDataLoaded = false;
+    private boolean isDataLoadedFromFirestore = false;
     private static final String PREFS_NAME = "RescueNetPrefs";
     private static final String KEY_REPORTS = "activeReports";
     private Location lastKnownLocation;
@@ -150,8 +150,15 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
                         List<ReportModel> firestoreReports = new ArrayList<>();
                         for (QueryDocumentSnapshot doc : value) {
                             ReportModel report = doc.toObject(ReportModel.class);
+                            report.setSyncedWithFirestore(true);
                             firestoreReports.add(report);
                         }
+
+                        // Only load mock data if both Firestore and local cache are empty on first successful check
+                        if (!isDataLoadedFromFirestore && firestoreReports.isEmpty() && activeReports.isEmpty()) {
+                            loadTierA_MockData();
+                        }
+                        isDataLoadedFromFirestore = true;
 
                         // Merge with local/GDACS reports and deduplicate
                         mergeAndRefreshReports(firestoreReports);
@@ -216,21 +223,30 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
             // Use null-safe comparison for source
             boolean isRescueNet = "RescueNet".equals(report.getSource()) || report.getSource() == null;
 
-            if (!report.isAnalyzedByAI() && isRescueNet) {
-                intelligenceService.analyzeReport(report, analyzedReport -> {
-                    runOnUiThread(() -> {
-                        // After AI analysis, upload to Firestore
-                        uploadReportToFirestore(analyzedReport);
-                        Log.d("OfflineSync", "Successfully re-analyzed and uploading report: " + analyzedReport.getId());
+            if (isRescueNet && !report.isSyncedWithFirestore()) {
+                if (!report.isAnalyzedByAI()) {
+                    intelligenceService.analyzeReport(report, analyzedReport -> {
+                        runOnUiThread(() -> {
+                            // After AI analysis, upload to Firestore
+                            uploadReportToFirestore(analyzedReport);
+                            Log.d("OfflineSync", "Successfully re-analyzed and uploading report: " + analyzedReport.getId());
+                        });
                     });
-                });
+                } else {
+                    // Already analyzed but not synced
+                    uploadReportToFirestore(report);
+                }
             }
         }
     }
 
     private void uploadReportToFirestore(ReportModel report) {
         reportsRef.document(report.getId()).set(report)
-                .addOnSuccessListener(aVoid -> Log.d("Firestore", "Report uploaded: " + report.getId()))
+                .addOnSuccessListener(aVoid -> {
+                    Log.d("Firestore", "Report uploaded: " + report.getId());
+                    report.setSyncedWithFirestore(true);
+                    saveReports(); // Save the synced state locally
+                })
                 .addOnFailureListener(e -> Log.e("Firestore", "Error uploading report", e));
     }
 
@@ -478,11 +494,6 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
 
         enableMyLocation();
         refreshMap();
-
-        if (!isDataLoaded && activeReports.isEmpty()) {
-            loadTierA_MockData();
-            isDataLoaded = true;
-        }
     }
 
     @Override
