@@ -60,6 +60,7 @@ dependencies {
     // Firebase (BoM controls versions)
     implementation(platform("com.google.firebase:firebase-bom:34.8.0"))
     implementation("com.google.firebase:firebase-firestore")
+    implementation("com.google.firebase:firebase-auth") // Firebase Authentication
 
     implementation("com.google.firebase:firebase-ai")
 
@@ -81,6 +82,7 @@ dependencies {
     implementation(libs.material)
     implementation(libs.activity)
     implementation(libs.constraintlayout)
+    implementation(libs.googleid)
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)

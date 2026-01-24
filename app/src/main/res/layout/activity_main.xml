@@ -15,6 +15,21 @@
         android:layout_height="match_parent" />
 
     <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn_google_login"
+        style="@style/Widget.MaterialComponents.Button.TextButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_marginTop="64dp"
+        android:layout_marginStart="16dp"
+        android:backgroundTint="#AAFFFFFF"
+        android:text="Google Login"
+        android:textColor="#D32F2F"
+        app:icon="@android:drawable/ic_menu_myplaces"
+        app:iconTint="#D32F2F"
+        app:cornerRadius="20dp" />
+
+    <com.google.android.material.button.MaterialButton
         android:id="@+id/btn_sync_feed"
         style="@style/Widget.MaterialComponents.Button.TextButton"
         android:layout_width="wrap_content"

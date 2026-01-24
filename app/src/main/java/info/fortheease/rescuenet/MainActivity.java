@@ -1,5 +1,7 @@
 package info.fortheease.rescuenet;
 
+import static com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL;
+
 import android.Manifest;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -10,6 +12,7 @@ import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 import android.location.Location;
 import android.os.Bundle;
+import android.os.CancellationSignal; // Added
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -23,6 +26,13 @@ import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.credentials.Credential;
+import androidx.credentials.CredentialManager; // Added
+import androidx.credentials.CredentialManagerCallback; // Added
+import androidx.credentials.CustomCredential;
+import androidx.credentials.GetCredentialRequest;
+import androidx.credentials.GetCredentialResponse; // Added
+import androidx.credentials.exceptions.GetCredentialException; // Added
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -37,25 +47,36 @@ import com.google.android.gms.maps.model.BitmapDescriptorFactory;
 import com.google.android.gms.maps.model.CircleOptions;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption;
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential;
 import com.google.android.material.bottomsheet.BottomSheetDialog;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton;
 import com.google.android.material.textfield.TextInputEditText;
+import com.google.firebase.auth.AuthCredential;
+import com.google.firebase.auth.GoogleAuthProvider;
 import com.google.firebase.firestore.CollectionReference;
+import com.google.firebase.firestore.DocumentReference;
 import com.google.firebase.firestore.FirebaseFirestore;
 import com.google.firebase.firestore.ListenerRegistration;
 import com.google.firebase.firestore.Query;
 import com.google.firebase.firestore.QueryDocumentSnapshot;
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseUser;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 
 import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 import okhttp3.ResponseBody;
 import retrofit2.Call;
@@ -79,10 +100,21 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
     private Location lastKnownLocation;
     private GdacsService gdacsService;
 
-    // Firestore
+    // Firebase
     private FirebaseFirestore db;
     private CollectionReference reportsRef;
+    private CollectionReference usersRef;
     private ListenerRegistration reportsListener;
+    private FirebaseAuth mAuth;
+    private String currentAnonymousUserId;
+
+    // Auth
+    private CredentialManager credentialManager; // Added CredentialManager
+
+    private final Executor backgroundExecutor = Executors.newSingleThreadExecutor();
+
+    private boolean areReportsLoaded = false;
+    private boolean isMapReady = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -98,10 +130,60 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
 
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
         intelligenceService = new IntelligenceService();
-        
+
+        // Initialize Credential Manager
+        credentialManager = CredentialManager.create(this);
+
+        // Initialize Firebase Auth
+        mAuth = FirebaseAuth.getInstance();
+
+        // Only sign in anonymously if not already signed in (optional logic, keeping your original flow)
+        if (mAuth.getCurrentUser() == null) {
+            signInAnonymously();
+        } else {
+            currentAnonymousUserId = mAuth.getCurrentUser().getUid();
+        }
+
         // Initialize Firestore
         db = FirebaseFirestore.getInstance();
         reportsRef = db.collection("reports");
+        usersRef = db.collection("users");
+
+        // Instantiate a Google sign-in request
+        GetGoogleIdOption googleIdOption = new GetGoogleIdOption.Builder()
+                .setFilterByAuthorizedAccounts(false) // Changed to false to allow new accounts to show up
+                .setServerClientId(getString(R.string.default_web_client_id))
+                .setAutoSelectEnabled(true)
+                .build();
+
+        // Create the Credential Manager request
+        GetCredentialRequest request = new GetCredentialRequest.Builder()
+                .addCredentialOption(googleIdOption)
+                .build();
+
+        MaterialButton gglLogin = findViewById(R.id.btn_google_login);
+        gglLogin.setOnClickListener(view -> {
+            // Correctly execute the async credential request
+            credentialManager.getCredentialAsync(
+                    this,
+                    request,
+                    new CancellationSignal(),
+                    ContextCompat.getMainExecutor(this),
+                    new CredentialManagerCallback<GetCredentialResponse, GetCredentialException>() {
+                        @Override
+                        public void onResult(GetCredentialResponse result) {
+                            // On success, pass the credential to your handler
+                            handleSignIn(result.getCredential());
+                        }
+
+                        @Override
+                        public void onError(GetCredentialException e) {
+                            Log.e("Auth", "Google Sign-In failed", e);
+                            Toast.makeText(MainActivity.this, "Sign in failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                        }
+                    }
+            );
+        });
 
         // Initialize Retrofit for GDACS with standard base URL
         Retrofit retrofit = new Retrofit.Builder()
@@ -110,32 +192,174 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
                 .build();
         gdacsService = retrofit.create(GdacsService.class);
 
-        loadReports(); // Load from SharedPreferences for instant UI
+        // Load from SharedPreferences on background thread, then proceed with UI setup
+        loadReportsAsync(() -> {
+            runOnUiThread(() -> {
+                recyclerView = findViewById(R.id.recycler_view);
+                recyclerView.setLayoutManager(new LinearLayoutManager(this));
+                adapter = new ReportAdapter(this, activeReports, this);
+                recyclerView.setAdapter(adapter);
 
-        recyclerView = findViewById(R.id.recycler_view);
-        recyclerView.setLayoutManager(new LinearLayoutManager(this));
-        adapter = new ReportAdapter(this, activeReports, this);
-        recyclerView.setAdapter(adapter);
+                SupportMapFragment mapFragment = (SupportMapFragment) getSupportFragmentManager()
+                        .findFragmentById(R.id.map);
+                if (mapFragment != null) {
+                    mapFragment.getMapAsync(this);
+                }
 
-        SupportMapFragment mapFragment = (SupportMapFragment) getSupportFragmentManager()
-                .findFragmentById(R.id.map);
-        if (mapFragment != null) {
-            mapFragment.getMapAsync(this);
+                ExtendedFloatingActionButton fabReport = findViewById(R.id.fab_report);
+                fabReport.setOnClickListener(v -> showReportDialog());
+
+                ExtendedFloatingActionButton fabSos = findViewById(R.id.fab_sos);
+                fabSos.setOnClickListener(v -> showSosConfirmation());
+
+                MaterialButton btnSyncFeed = findViewById(R.id.btn_sync_feed);
+                btnSyncFeed.setOnClickListener(v -> syncGdacsFeed());
+
+                // Set flag and conditionally refresh map and adapter
+                areReportsLoaded = true;
+                if (isMapReady) {
+                    refreshMap();
+                    adapter.notifyDataSetChanged();
+                }
+
+                // Check for pending background analysis on startup
+                reprocessOfflineReports();
+
+                setupFirestoreListener();
+
+                // Check access permissions after all initializations are done
+                checkAccessPermissions();
+            });
+        });
+    }
+
+    private void handleSignIn(Credential credential) {
+        // Fix: Split the instanceof check and the variable declaration for Java 8/11 compatibility
+        if (credential instanceof CustomCredential &&
+                credential.getType().equals(TYPE_GOOGLE_ID_TOKEN_CREDENTIAL)) {
+
+            try {
+                // Explicitly cast the credential
+                CustomCredential customCredential = (CustomCredential) credential;
+
+                // Create Google ID Token
+                Bundle credentialData = customCredential.getData();
+                GoogleIdTokenCredential googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credentialData);
+
+                // Sign in to Firebase with using the token
+                firebaseAuthWithGoogle(googleIdTokenCredential.getIdToken());
+            } catch (Exception e) {
+                Log.e("Auth", "Error parsing Google ID Token", e);
+            }
+        } else {
+            Log.w("Auth", "Credential is not of type Google ID!");
+        }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+    }
+
+    private void firebaseAuthWithGoogle(String idToken) {
+        AuthCredential credential = GoogleAuthProvider.getCredential(idToken, null);
+        mAuth.signInWithCredential(credential)
+                .addOnCompleteListener(this, task -> {
+                    if (task.isSuccessful()) {
+                        // Sign in success, update UI with the signed-in user's information
+                        Log.d("Auth", "signInWithCredential:success");
+                        FirebaseUser user = mAuth.getCurrentUser();
+                        if (user != null) {
+                            currentAnonymousUserId = user.getUid();
+                            Toast.makeText(MainActivity.this, "Welcome " + user.getDisplayName(), Toast.LENGTH_SHORT).show();
+                            // Re-check permissions for the new user
+                            checkAccessPermissions();
+                        }
+                    } else {
+                        // If sign in fails, display a message to the user
+                        Log.w("Auth", "signInWithCredential:failure", task.getException());
+                        Toast.makeText(MainActivity.this, "Authentication failed.",
+                                Toast.LENGTH_SHORT).show();
+                    }
+                });
+    }
+
+    private void checkAccessPermissions() {
+        // Check if anonymous user ID is available
+        if (currentAnonymousUserId == null) {
+            return;
         }
 
-        ExtendedFloatingActionButton fabReport = findViewById(R.id.fab_report);
-        fabReport.setOnClickListener(v -> showReportDialog());
+        DocumentReference userDocRef = usersRef.document(currentAnonymousUserId);
+        userDocRef.get().addOnSuccessListener(documentSnapshot -> {
+            if (documentSnapshot.exists()) {
+                Long mistakeCounter = documentSnapshot.getLong("mistakeCounter");
+                if (mistakeCounter != null && mistakeCounter >= 3) {
+                    showAccessDeniedDialog();
+                }
+            }
+        }).addOnFailureListener(e -> {
+            Log.e("Permissions", "Error fetching user document: ", e);
+        });
+    }
 
-        ExtendedFloatingActionButton fabSos = findViewById(R.id.fab_sos);
-        fabSos.setOnClickListener(v -> showSosConfirmation());
+    private void createUserIfNotFound() {
+        if (currentAnonymousUserId == null) {
+            return; // Cannot create user if ID is not yet available
+        }
 
-        MaterialButton btnSyncFeed = findViewById(R.id.btn_sync_feed);
-        btnSyncFeed.setOnClickListener(v -> syncGdacsFeed());
+        DocumentReference userDocRef = usersRef.document(currentAnonymousUserId);
+        userDocRef.get().addOnCompleteListener(task -> {
+            if (task.isSuccessful()) {
+                if (!task.getResult().exists()) {
+                    // User document does not exist, create it with default values
+                    Map<String, Object> userData = new HashMap<>();
+                    userData.put("anonymousId", currentAnonymousUserId);
+                    userData.put("mistakeCounter", 0); // Initialize mistakeCounter to 0
 
-        // Check for pending background analysis on startup
-        reprocessOfflineReports();
+                    userDocRef.set(userData)
+                            .addOnSuccessListener(aVoid -> Log.d("UserCreation", "User document created for " + currentAnonymousUserId))
+                            .addOnFailureListener(e -> Log.e("UserCreation", "Error creating user document", e));
+                } else {
+                    // User document already exists, do nothing or log it.
+                    Log.d("UserCreation", "User document already exists for " + currentAnonymousUserId);
+                }
+            }
+        });
+    }
 
-        setupFirestoreListener();
+    private void showAccessDeniedDialog() {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Access Denied")
+                .setMessage("Your access has been denied due to too many mistakes. You will be logged out.")
+                .setPositiveButton("OK", (dialog, which) -> finish())
+                .setCancelable(false)
+                .setIcon(android.R.drawable.ic_dialog_alert)
+                .show();
+    }
+
+    private void signInAnonymously() {
+        mAuth.signInAnonymously()
+                .addOnCompleteListener(this, task -> {
+                    if (task.isSuccessful()) {
+                        // Sign in success, update UI with the signed-in user's information
+                        Log.d("Auth", "signInAnonymously:success");
+                        FirebaseUser user = mAuth.getCurrentUser();
+                        if (user != null) {
+                            currentAnonymousUserId = user.getUid();
+                            Log.d("Auth", "Anonymous User ID: " + currentAnonymousUserId);
+                            // After successful sign-in, check or create the user document
+                            createUserIfNotFound();
+                            // Also, re-check permissions in case user data was loaded before auth completed.
+                            checkAccessPermissions();
+                        }
+                    } else {
+                        // If sign in fails, display a message to the user.
+                        Log.w("Auth", "signInAnonymously:failure", task.getException());
+                        Toast.makeText(MainActivity.this, "Authentication failed.",
+                                Toast.LENGTH_SHORT).show();
+                    }
+                });
     }
 
     private void setupFirestoreListener() {
@@ -177,6 +401,11 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         List<ReportModel> combined = new ArrayList<>(firestoreReports);
         for (ReportModel local : activeReports) {
             if (!firestoreIds.contains(local.getId())) {
+                // If it's a report that was previously synced but now it's gone from Firestore,
+                // it means it was deleted on the server. Don't add it back to combined list.
+                if (local.isSyncedWithFirestore()) {
+                    continue;
+                }
                 combined.add(local);
             }
         }
@@ -303,15 +532,15 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
                                 String description = feature.properties.description != null ? feature.properties.description : summary;
 
                                 ReportModel gdacsReport = new ReportModel(description, lat, lng);
-                                
+
                                 // Deterministic ID to avoid duplicates in Firestore
                                 String gdacsId = "gdacs_" + Math.abs((summary + lat + lng).hashCode());
                                 gdacsReport.setId(gdacsId);
-                                
+
                                 gdacsReport.setCategory(feature.properties.eventtype != null ? feature.properties.eventtype : "Disaster");
                                 gdacsReport.setSummary(summary);
                                 gdacsReport.setSource("GDACS");
-                                gdacsReport.setAnalyzedByAI(true); 
+                                gdacsReport.setAnalyzedByAI(true);
 
                                 int sev = 5;
                                 if (feature.properties.severity != null) {
@@ -354,11 +583,14 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
     @Override
     protected void onResume() {
         super.onResume();
-        loadReports();
-        if (adapter != null) {
-            adapter.notifyDataSetChanged();
-        }
-        refreshMap();
+        loadReportsAsync(() -> {
+            runOnUiThread(() -> {
+                if (adapter != null) {
+                    adapter.notifyDataSetChanged();
+                }
+                refreshMap();
+            });
+        });
     }
 
     @Override
@@ -370,16 +602,25 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
     }
 
     private void showSosConfirmation() {
+        final String[] sosOptions = {"Police", "Fire Brigade", "Ambulance"};
         new MaterialAlertDialogBuilder(this)
-                .setTitle("Trigger Emergency SOS?")
-                .setMessage("This will immediately alert the Police and Rapid Action Force with your current location. Are you sure?")
-                .setPositiveButton("YES, TRIGGER SOS", (dialog, which) -> triggerSos())
+                .setTitle("Select Emergency Service")
+                .setItems(sosOptions, (dialog, which) -> {
+                    String selectedAuthority = sosOptions[which];
+                    String category = "SOS"; // Default category
+                    if (selectedAuthority.equals("Fire Brigade")) {
+                        category = "Fire";
+                    } else if (selectedAuthority.equals("Ambulance")) {
+                        category = "Medical";
+                    }
+                    triggerSosWithAuthority(selectedAuthority, category);
+                })
                 .setNegativeButton("Cancel", null)
                 .setIcon(android.R.drawable.ic_menu_call)
                 .show();
     }
 
-    private void triggerSos() {
+    private void triggerSosWithAuthority(String relevantAuthority, String category) {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, LOCATION_PERMISSION_REQUEST_CODE);
             return;
@@ -387,26 +628,25 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
 
         fusedLocationClient.getLastLocation().addOnSuccessListener(this, location -> {
             lastKnownLocation = location;
-            double lat = 23.3441;
-            double lng = 85.3096;
-            if (location != null) {
-                lat = location.getLatitude();
-                lng = location.getLongitude();
-            }
+            double lat = location != null ? location.getLatitude() : 23.3441;
+            double lng = location != null ? location.getLongitude() : 85.3096;
 
             ReportModel sosReport = new ReportModel("IMMEDIATE SOS: User needs urgent rescue!", lat, lng);
-            sosReport.setCategory("SOS");
+            sosReport.setCategory(category); // Set category based on selection
             sosReport.setSeverityScore(10);
             sosReport.setSummary("Critical SOS request triggered by user.");
-            sosReport.setRelevantAuthority("Police & Rapid Action Force");
+            sosReport.setRelevantAuthority(relevantAuthority); // Set authority based on selection
             sosReport.setSource("RescueNet");
             sosReport.setAnalyzedByAI(true); // SOS is pre-defined
+            if (currentAnonymousUserId != null) {
+                sosReport.setAnonymousId(currentAnonymousUserId);
+            }
 
             processNewReportDirectly(sosReport);
 
             new MaterialAlertDialogBuilder(this)
                     .setTitle("SOS DISPATCHED")
-                    .setMessage("Your SOS request has been received and emergency units are being dispatched via " + sosReport.getRelevantAuthority())
+                    .setMessage("Your SOS request has been received and emergency units are being dispatched via " + relevantAuthority)
                     .setPositiveButton("UNDERSTOOD", null)
                     .setIcon(android.R.drawable.ic_dialog_alert)
                     .show();
@@ -482,6 +722,9 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
 
             ReportModel userReport = new ReportModel(description, lat, lng);
             userReport.setSource("RescueNet");
+            if (currentAnonymousUserId != null) {
+                userReport.setAnonymousId(currentAnonymousUserId);
+            }
             processNewReport(userReport, true);
         });
     }
@@ -489,11 +732,20 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
     @Override
     public void onMapReady(@NonNull GoogleMap googleMap) {
         mMap = googleMap;
+        isMapReady = true;
+
         LatLng startLoc = new LatLng(23.3441, 85.3096);
         mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(startLoc, 14));
 
         enableMyLocation();
-        refreshMap();
+
+        // Conditionally refresh map and adapter if reports are already loaded
+        if (areReportsLoaded) {
+            refreshMap();
+            if (adapter != null) {
+                adapter.notifyDataSetChanged();
+            }
+        }
     }
 
     @Override
@@ -681,24 +933,32 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
     }
 
     private void saveReports() {
-        SharedPreferences sharedPreferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        SharedPreferences.Editor editor = sharedPreferences.edit();
-        Gson gson = new Gson();
-        String json = gson.toJson(activeReports);
-        editor.putString(KEY_REPORTS, json);
-        editor.apply();
+        backgroundExecutor.execute(() -> {
+            SharedPreferences sharedPreferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            SharedPreferences.Editor editor = sharedPreferences.edit();
+            Gson gson = new Gson();
+            String json = gson.toJson(activeReports);
+            editor.putString(KEY_REPORTS, json);
+            editor.apply();
+        });
     }
 
-    private void loadReports() {
-        SharedPreferences sharedPreferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        Gson gson = new Gson();
-        String json = sharedPreferences.getString(KEY_REPORTS, null);
-        Type type = new TypeToken<ArrayList<ReportModel>>() {}.getType();
-        List<ReportModel> loadedReports = gson.fromJson(json, type);
+    private void loadReportsAsync(Runnable onLoadedCallback) {
+        backgroundExecutor.execute(() -> {
+            SharedPreferences sharedPreferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            Gson gson = new Gson();
+            String json = sharedPreferences.getString(KEY_REPORTS, null);
+            Type type = new TypeToken<ArrayList<ReportModel>>() {}.getType();
+            List<ReportModel> loadedReports = gson.fromJson(json, type);
 
-        activeReports.clear();
-        if (loadedReports != null) {
-            activeReports.addAll(loadedReports);
-        }
+            activeReports.clear();
+            if (loadedReports != null) {
+                activeReports.addAll(loadedReports);
+            }
+
+            if (onLoadedCallback != null) {
+                onLoadedCallback.run();
+            }
+        });
     }
 }

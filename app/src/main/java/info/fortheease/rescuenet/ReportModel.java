@@ -20,6 +20,9 @@ public class ReportModel {
     private boolean isAnalyzedByAI = false;
     private boolean isSyncedWithFirestore = false;
 
+    // New fields for Anonymous Authentication
+    private String anonymousId;
+
     // Required for Firestore
     public ReportModel() {
     }
@@ -77,4 +80,8 @@ public class ReportModel {
 
     public boolean isSyncedWithFirestore() { return isSyncedWithFirestore; }
     public void setSyncedWithFirestore(boolean syncedWithFirestore) { isSyncedWithFirestore = syncedWithFirestore; }
+
+    // New Getters and Setters for Anonymous Authentication
+    public String getAnonymousId() { return anonymousId; }
+    public void setAnonymousId(String anonymousId) { this.anonymousId = anonymousId; }
 }
