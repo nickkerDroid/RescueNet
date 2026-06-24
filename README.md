@@ -6,7 +6,7 @@
 ![AI](https://img.shields.io/badge/AI-Gemini%202.0%20Flash-blueviolet)
 ![Status](https://img.shields.io/badge/Status-Archived%20(Hackathon%20Project)-lightgrey)
 
-> **Note:** RescueNet was developed to bridge the gap between incident reporting and emergency response using modern AI and real-time synchronization. It is a Hackathon project.
+> **Note:** RescueNet is a Hackathon project.
 
 **RescueNet** is a decentralized disaster management and coordination platform. It empowers citizens to report incidents in real-time, which are then analyzed by AI to facilitate rapid response from authorities. By integrating global feeds and local reports, it creates a unified crisis map for emergency services and the public.
 
